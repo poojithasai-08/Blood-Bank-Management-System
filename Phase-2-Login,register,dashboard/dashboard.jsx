@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 
 // ── COLOR CONFIGURATION SYSTEM ────────────────────────
 const COLORS = {
@@ -39,14 +39,55 @@ const MOCK_DONORS_DB = [
   { id: 105, name: "Vikram Sai", bloodGroup: "AB+", lat: 17.4210, lng: 78.4320, phone: "+91 99887 76655", city: "Hyderabad" }
 ];
 
+// ════════════════════════════════════════════════════════
+// LOCAL STORAGE PERSISTENCE LAYER (New)
+// ════════════════════════════════════════════════════════
+// Key used for hospital records
+const HOSPITALS_KEY = "bloodbank_hospitals";
+// Key used for donor registration / donation records, each tagged with hospitalId
+const DONATIONS_KEY = "bloodbank_donations";
+
+const readStore = (key, fallback) => {
+  try {
+    const raw = localStorage.getItem(key);
+    return raw ? JSON.parse(raw) : fallback;
+  } catch {
+    return fallback;
+  }
+};
+
+const writeStore = (key, value) => {
+  try {
+    localStorage.setItem(key, JSON.stringify(value));
+    // Notify any other mounted panels in this tab to refresh themselves
+    window.dispatchEvent(new Event("bloodbank-sync"));
+  } catch {
+    // Storage write failed silently; UI still reflects in-memory state
+  }
+};
+
 export default function App() {
   const [session, setSession] = useState({ loggedIn: false, role: null });
   const [activeFormTab, setActiveFormTab] = useState("donor"); // 'donor' or 'hospital'
 
+  // Hospitals registered so far (loaded once on startup, kept fresh via sync event)
+  const [hospitals, setHospitals] = useState(() => readStore(HOSPITALS_KEY, []));
+
+  useEffect(() => {
+    const onSync = () => setHospitals(readStore(HOSPITALS_KEY, []));
+    window.addEventListener("bloodbank-sync", onSync);
+    window.addEventListener("storage", onSync);
+    return () => {
+      window.removeEventListener("bloodbank-sync", onSync);
+      window.removeEventListener("storage", onSync);
+    };
+  }, []);
+
   // Refined states matching image input structures precisely
   const [donorProfile, setDonorProfile] = useState({
     name: "", email: "", phone: "", dob: "", gender: "", bloodGroup: "A+", city: "",
-    lastDonationDate: "", eligibilityStatus: "Eligible", address: "", emergencyName: "", emergencyPhone: ""
+    lastDonationDate: "", eligibilityStatus: "Eligible", address: "", emergencyName: "", emergencyPhone: "",
+    hospitalName: ""
   });
 
   const [hospitalProfile, setHospitalProfile] = useState({
@@ -56,12 +97,76 @@ export default function App() {
   // Global Weather Context Matrix (Initialized to safe medium, user/admin modifiable)
   const [liveWeather, setLiveWeather] = useState({ temp: 28, condition: "Partly Cloudy" });
 
+  // ── Register donor → save into bloodbank_donations, tagged to matched hospital ──
+  const handleDonorRegister = () => {
+    if (!donorProfile.name || !donorProfile.email) {
+      alert("Please fill in Name and Email fields to enter.");
+      return;
+    }
+    if (!donorProfile.hospitalName.trim()) {
+      alert("Please enter the name of the Hospital you're registering with.");
+      return;
+    }
+
+    // Match the typed hospital name against registered hospitals, case-insensitive,
+    // so the donor's free-text entry still links to the correct hospitalId.
+    const typedName = donorProfile.hospitalName.trim().toLowerCase();
+    const matchedHospital = hospitals.find(h => h.hospitalName.trim().toLowerCase() === typedName);
+
+    const record = {
+      id: Date.now(),
+      name: donorProfile.name,
+      email: donorProfile.email,
+      phone: donorProfile.phone,
+      dob: donorProfile.dob,
+      gender: donorProfile.gender,
+      bloodGroup: donorProfile.bloodGroup,
+      city: donorProfile.city,
+      // If a registered hospital matches the typed name, link by its hospitalId so the
+      // hospital dashboard filter (which keys off hospitalId) picks this record up.
+      // Otherwise fall back to the typed name itself so the record isn't lost.
+      hospitalId: matchedHospital ? matchedHospital.hospitalId : donorProfile.hospitalName.trim(),
+      hospitalName: matchedHospital ? matchedHospital.hospitalName : donorProfile.hospitalName.trim(),
+      registeredAt: new Date().toISOString(),
+      status: "Registered"
+    };
+
+    const existingDonations = readStore(DONATIONS_KEY, []);
+    writeStore(DONATIONS_KEY, [record, ...existingDonations]);
+
+    setSession({ loggedIn: true, role: "donor" });
+  };
+
+  // ── Register hospital → save into bloodbank_hospitals ──
+  const handleHospitalRegister = () => {
+    if (!hospitalProfile.hospitalName || !hospitalProfile.hospitalId) {
+      alert("Please fill in Facility Name and License Key.");
+      return;
+    }
+
+    const existingHospitals = readStore(HOSPITALS_KEY, []);
+    const alreadyExists = existingHospitals.some(h => h.hospitalId === hospitalProfile.hospitalId);
+    if (alreadyExists) {
+      alert("A hospital with this License Key is already registered. Please use a different ID or log in.");
+      return;
+    }
+
+    const record = { ...hospitalProfile, registeredAt: new Date().toISOString() };
+    const updated = [record, ...existingHospitals];
+    writeStore(HOSPITALS_KEY, updated);
+    setHospitals(updated);
+
+    setSession({ loggedIn: true, role: "hospital" });
+  };
+
   if (!session.loggedIn) {
     return (
       <div style={{ minHeight: "100vh", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", background: `linear-gradient(135deg, ${COLORS.dark} 0%, ${COLORS.darkSoft} 100%)`, fontFamily: "system-ui, sans-serif", padding: "20px" }}>
         
         {/* TOP SIGNUP NAVIGATION GATEWAY BAR */}
-        <div style={{ background: COLORS.red, padding: "12px 24px", borderRadius: "50px", display: "flex", gap: "16px", marginBottom: "30px", boxShadow: "0 8px 24px rgba(0,0,0,0.2)", width: "100%", maxWidth: "480px", justifyContent: "center", alignItems: "center" }}>
+        <div style={{ 
+          background: COLORS.red, padding: "12px 24px", borderRadius: "50px", display: "flex", gap: "16px", marginBottom: "30px", boxShadow: "0 8px 24px rgba(0,0,0,0.2)", width: "100%", maxWidth: "480px", justifyContent: "center", alignItems: "center" 
+          }}>
           <button onClick={() => setActiveFormTab("donor")} style={{ padding: "10px 24px", borderRadius: "30px", border: "none", background: activeFormTab === "donor" ? COLORS.white : "transparent", color: activeFormTab === "donor" ? COLORS.redDark : COLORS.white, fontWeight: "800", cursor: "pointer", display: "flex", alignItems: "center", gap: "6px", transition: "all 0.2s" }}>
             Directly 🩸 Donate Now
           </button>
@@ -132,10 +237,13 @@ export default function App() {
                 </div>
               </div>
 
-              <button onClick={() => {
-                if(!donorProfile.name || !donorProfile.email) return alert("Please fill in Name and Email fields to enter.");
-                setSession({ loggedIn: true, role: "donor" });
-              }} style={{ width: "100%", padding: "14px", background: COLORS.red, color: COLORS.white, border: "none", borderRadius: "8px", fontWeight: "800", fontSize: "15px", marginTop: "12px", cursor: "pointer" }}>
+              {/* NEW: Hospital selection — links this donor record to one hospital (plain text for now) */}
+              <div>
+                <label style={{ fontSize: "12px", fontWeight: "700", color: COLORS.dark }}><span style={{ marginRight: "4px" }}>🏥</span>Select Hospital</label>
+                <input type="text" placeholder="e.g. Apollo Hospital Central" value={donorProfile.hospitalName} onChange={e => setDonorProfile({...donorProfile, hospitalName: e.target.value})} style={{ width: "100%", padding: "10px", marginTop: "4px", borderRadius: "8px", border: `1px solid ${COLORS.grayL}`, boxSizing: "border-box" }} />
+              </div>
+
+              <button onClick={handleDonorRegister} style={{ width: "100%", padding: "14px", background: COLORS.red, color: COLORS.white, border: "none", borderRadius: "8px", fontWeight: "800", fontSize: "15px", marginTop: "12px", cursor: "pointer" }}>
                 Register Account
               </button>
             </div>
@@ -159,10 +267,7 @@ export default function App() {
                 <input type="text" placeholder="e.g. Hyderabad" value={hospitalProfile.city} onChange={e => setHospitalProfile({...hospitalProfile, city: e.target.value})} style={{ width: "100%", padding: "10px", marginTop: "4px", borderRadius: "8px", border: `1px solid ${COLORS.grayL}`, boxSizing: "border-box" }} />
               </div>
 
-              <button onClick={() => {
-                if(!hospitalProfile.hospitalName || !hospitalProfile.hospitalId) return alert("Please fill in Facility Name and License Key.");
-                setSession({ loggedIn: true, role: "hospital" });
-              }} style={{ width: "100%", padding: "14px", background: COLORS.red, color: COLORS.white, border: "none", borderRadius: "8px", fontWeight: "800", fontSize: "15px", marginTop: "12px", cursor: "pointer" }}>
+              <button onClick={handleHospitalRegister} style={{ width: "100%", padding: "14px", background: COLORS.red, color: COLORS.white, border: "none", borderRadius: "8px", fontWeight: "800", fontSize: "15px", marginTop: "12px", cursor: "pointer" }}>
                 Register Facility Account
               </button>
             </div>
@@ -435,6 +540,37 @@ function HospitalPanel({ profile, weather, setWeather, onLogout }) {
   const [locatedDonors, setLocatedDonors] = useState([]);
   const [isSearchingGps, setIsSearchingGps] = useState(false);
 
+  // ── NEW: Donor registrations scoped to THIS hospital only ──────────────
+  // Reads bloodbank_donations and filters to records belonging to this hospital.
+  // Matches by hospitalId (exact) OR hospitalName (case-insensitive) so that
+  // donors who typed the hospital name as free text still resolve correctly.
+  const belongsToThisHospital = (d) => {
+    if (d.hospitalId === profile.hospitalId) return true;
+    if (d.hospitalName && profile.hospitalName) {
+      return d.hospitalName.trim().toLowerCase() === profile.hospitalName.trim().toLowerCase();
+    }
+    return false;
+  };
+
+  const [myDonors, setMyDonors] = useState(() =>
+    readStore(DONATIONS_KEY, []).filter(belongsToThisHospital)
+  );
+
+  // Re-read from storage whenever a donor registers anywhere (same tab via custom
+  // event, or a different tab/window via the native "storage" event), so the
+  // hospital dashboard updates instantly without needing a manual refresh.
+  useEffect(() => {
+    const refreshDonors = () => {
+      setMyDonors(readStore(DONATIONS_KEY, []).filter(belongsToThisHospital));
+    };
+    window.addEventListener("bloodbank-sync", refreshDonors);
+    window.addEventListener("storage", refreshDonors);
+    return () => {
+      window.removeEventListener("bloodbank-sync", refreshDonors);
+      window.removeEventListener("storage", refreshDonors);
+    };
+  }, [profile.hospitalId, profile.hospitalName]);
+
   const handleUpdateStock = (group, val) => {
     setInventory(inventory.map(i => i.group === group ? { ...i, units: Math.max(0, parseInt(val) || 0) } : i));
   };
@@ -462,7 +598,9 @@ function HospitalPanel({ profile, weather, setWeather, onLogout }) {
   };
 
   // Section 8 Summary Variables Aggregations
-  const totalDonorsSystemCount = 1420;
+  // NOTE: total registered donors now reflects this hospital's own real
+  // localStorage-backed registrations instead of a hardcoded figure.
+  const totalDonorsSystemCount = myDonors.length;
   const totalActiveStockUnits = inventory.reduce((acc, curr) => acc + curr.units, 0);
   const totalExpiredUnitsCount = 6; // Evaluated simulation metric
 
@@ -471,11 +609,12 @@ function HospitalPanel({ profile, weather, setWeather, onLogout }) {
   const compatibleInventoryBatches = inventory.filter(item => eligibleTransfusionSources.includes(item.group) || eligibleTransfusionSources.includes("All Blood Types"));
 
   const adminTabs = [
-    { id: "adminDashboard", label: "8. Admin Dashboard Summary", icon: "📊" },
+    { id: "adminDashboard", label: "Admin Dashboard Summary", icon: "📊" },
+    { id: "donorRegistry", label: "Registered Donors", icon: "👥" },
     { id: "inventory", label: "Inventory Warehouse Stock", icon: "🩸" },
-    { id: "compatibility", label: "6. Compatibility Checker", icon: "🔬" },
-    { id: "expiry", label: "7. Expiry Management", icon: "⏳" },
-    { id: "geoFinder", label: "9. Geo Location Finder", icon: "📍" },
+    { id: "compatibility", label: "Compatibility Checker", icon: "🔬" },
+    { id: "expiry", label: "Expiry Management", icon: "⏳" },
+    { id: "geoFinder", label: "Geo Location Finder", icon: "📍" },
     { id: "requests", label: "Allocation Requests Pipeline", icon: "📨" },
     { id: "weatherAdmin", label: "Weather Simulation Control", icon: "🌦️" }
   ];
@@ -540,6 +679,36 @@ function HospitalPanel({ profile, weather, setWeather, onLogout }) {
               </div>
             </div>
           </div>
+        </div>
+      )}
+
+      {/* ────────────────────────────────────────────────────────────────────── */}
+      {/* NEW SECTION: REGISTERED DONORS (scoped to this hospital only)        */}
+      {/* ────────────────────────────────────────────────────────────────────── */}
+      {activeTab === "donorRegistry" && (
+        <div style={{ background: COLORS.white, padding: "24px", borderRadius: 12 }}>
+          <h3 style={{ margin: "0 0 4px", fontSize: 16, fontWeight: 800 }}>👥 Registered Donor Registry</h3>
+          <p style={{ margin: "0 0 20px", fontSize: 12, color: COLORS.gray }}>
+            Donors who registered with <strong>{profile.hospitalName || "this hospital"}</strong>, retrieved from persistent local storage. Other hospitals cannot see these records.
+          </p>
+          {myDonors.length === 0 ? (
+            <p style={{ color: COLORS.gray, fontSize: 13 }}>No donors have registered with this hospital yet.</p>
+          ) : (
+            <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+              {myDonors.map(d => (
+                <div key={d.id} style={{ border: `1px solid ${COLORS.grayL}`, borderRadius: 8, padding: "14px 16px", display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 8 }}>
+                  <div>
+                    <div style={{ fontWeight: 800, fontSize: 14, color: COLORS.dark }}>{d.name}</div>
+                    <div style={{ fontSize: 12, color: COLORS.gray, marginTop: 2 }}>{d.city || "—"} · {d.phone || "—"} · {d.email}</div>
+                  </div>
+                  <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                    <span style={{ padding: "4px 10px", background: COLORS.redPale, color: COLORS.red, borderRadius: 4, fontSize: 12, fontWeight: 800 }}>{d.bloodGroup}</span>
+                    <span style={{ fontSize: 11, color: COLORS.gray }}>{new Date(d.registeredAt).toLocaleDateString()}</span>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
         </div>
       )}
 
@@ -634,7 +803,7 @@ function HospitalPanel({ profile, weather, setWeather, onLogout }) {
 
             {/* "Use First" Priority List */}
             <div style={{ background: COLORS.white, padding: "24px", borderRadius: 12, boxShadow: "0 2px 6px rgba(0,0,0,0.02)" }}>
-              <h3 style={{ margin: "0 0 4px", fontSize: 14, fontWeight: 800 }}>⚡ “Use First” Priority Dispensation Pipeline</h3>
+              <h3 style={{ margin: "0 0 4px", fontSize: 14, fontWeight: 800 }}>⚡ "Use First" Priority Dispensation Pipeline</h3>
               <p style={{ margin: "0 0 15px", fontSize: 12, color: COLORS.gray }}>Dynamically ordered by structural decay rate indicators.</p>
               <div style={{ display: "flex", flexDirection: "column", gap: "10px" }}>
                 {inventory.filter(i => i.units > 0).sort((a, b) => a.expiryDays - b.expiryDays).map((item, index) => (
@@ -719,8 +888,7 @@ function HospitalPanel({ profile, weather, setWeather, onLogout }) {
               <div key={r.id} style={{ border: `1px solid ${COLORS.grayL}`, padding: "12px", borderRadius: 8, marginBottom: 10, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
                 <div>
                   <div style={{ fontWeight: "700", fontSize: 13 }}>Factor Type: {r.group}</div>
-                  <div style={{ fontSize: 12, color: COLORS.gray, marginTop: 2 }}>Required Volumetric Metric: {r.units} Units</div>
-                </div>
+                  <div style={{ fontSize: 12, color: COLORS.gray, marginTop: 2 }}>Required Volumetric Metric: {r.units} Units</div> </div>
                 <span style={{ fontSize: 11, background: COLORS.orangeL, color: COLORS.orange, padding: "4px 8px", borderRadius: 4, fontWeight: "700" }}>{r.status}</span>
               </div>
             ))}
